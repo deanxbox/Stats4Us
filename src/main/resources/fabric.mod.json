@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "stats4us",
+  "version": "${version}",
+  "name": "Stats4Us",
+  "description": "Server-side Minecraft statistics dashboard and operator statistics editor.",
+  "authors": [
+    "deanxbox"
+  ],
+  "license": "MIT",
+  "icon": "assets/stats4us/icon.png",
+  "environment": "server",
+  "entrypoints": {
+    "main": [
+      "com.deanxbox.stats4us.Stats4UsMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.2",
+    "minecraft": "~26.1.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
