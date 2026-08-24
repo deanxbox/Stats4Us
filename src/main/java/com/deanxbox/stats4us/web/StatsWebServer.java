@@ -10,23 +10,21 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import net.minecraft.server.MinecraftServer;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Enumeration;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPOutputStream;
 
 public final class StatsWebServer {
     private static final Gson GSON = new GsonBuilder()
@@ -53,8 +51,9 @@ public final class StatsWebServer {
             InetSocketAddress socketAddress = new InetSocketAddress(bindAddress, config.web.port);
             httpServer = HttpServer.create(socketAddress, 0);
             httpServer.createContext("/", this::handleIndex);
+            httpServer.createContext("/favicon.png", this::handleFavicon);
             httpServer.createContext("/api/stats", this::handleStats);
-            executor = Executors.newCachedThreadPool(runnable -> {
+            executor = Executors.newFixedThreadPool(4, runnable -> {
                 Thread thread = new Thread(runnable, "Stats4Us Web");
                 thread.setDaemon(true);
                 return thread;
@@ -94,20 +93,16 @@ public final class StatsWebServer {
     }
 
     private String displayAddress() {
-        if ("0.0.0.0".equals(config.web.bindAddress) || "::".equals(config.web.bindAddress)) {
-            return "http://" + detectedHostAddress() + ":" + config.web.port + "/";
-        }
-
-        return "http://" + config.web.bindAddress + ":" + config.web.port + "/";
+        String host = "0.0.0.0".equals(config.web.bindAddress) || "::".equals(config.web.bindAddress)
+            ? detectedHostAddress()
+            : config.web.bindAddress;
+        host = host.contains(":") ? "[" + host + "]" : host;
+        return "http://" + host + ":" + config.web.port + "/";
     }
 
     private String detectedHostAddress() {
-        String publicAddress = detectedPublicAddress();
-        if (publicAddress != null) {
-            return publicAddress;
-        }
-
         try {
+            String fallback = null;
             Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
                 NetworkInterface networkInterface = interfaces.nextElement();
@@ -118,49 +113,39 @@ public final class StatsWebServer {
                 Enumeration<InetAddress> addresses = networkInterface.getInetAddresses();
                 while (addresses.hasMoreElements()) {
                     InetAddress address = addresses.nextElement();
-                    if (!address.isLoopbackAddress() && address.isSiteLocalAddress()) {
+                    if (!(address instanceof Inet4Address)
+                        || address.isLoopbackAddress()
+                        || address.isAnyLocalAddress()
+                        || address.isMulticastAddress()
+                        || address.isLinkLocalAddress()) {
+                        continue;
+                    }
+                    if (address.isSiteLocalAddress()) {
                         return address.getHostAddress();
+                    }
+                    if (fallback == null) {
+                        fallback = address.getHostAddress();
                     }
                 }
             }
 
+            if (fallback != null) {
+                return fallback;
+            }
+
             InetAddress localHost = InetAddress.getLocalHost();
-            if (localHost != null && !localHost.isLoopbackAddress()) {
+            if (localHost instanceof Inet4Address
+                && !localHost.isLoopbackAddress()
+                && !localHost.isAnyLocalAddress()
+                && !localHost.isMulticastAddress()
+                && !localHost.isLinkLocalAddress()) {
                 return localHost.getHostAddress();
             }
         } catch (Exception exception) {
             Stats4UsMod.LOGGER.debug("Failed to detect local Stats4Us dashboard address.", exception);
         }
 
-        return "public-ip-unavailable";
-    }
-
-    private String detectedPublicAddress() {
-        List<String> endpoints = List.of(
-            "https://checkip.amazonaws.com/",
-            "https://api.ipify.org/"
-        );
-        HttpClient client = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(2))
-            .build();
-
-        for (String endpoint : endpoints) {
-            try {
-                HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
-                    .timeout(Duration.ofSeconds(3))
-                    .GET()
-                    .build();
-                String body = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).body().trim();
-                if (body.matches("\\d{1,3}(\\.\\d{1,3}){3}") || body.matches("[0-9a-fA-F:]{2,}")) {
-                    return body;
-                }
-            } catch (Exception exception) {
-                Stats4UsMod.LOGGER.debug("Failed to detect public Stats4Us dashboard address from {}.", endpoint, exception);
-            }
-        }
-
-        Stats4UsMod.LOGGER.warn("Stats4Us could not reach public IP detection APIs; falling back to a local dashboard address.");
-        return null;
+        return "localhost";
     }
 
     private void handleIndex(final HttpExchange exchange) throws IOException {
@@ -170,6 +155,21 @@ public final class StatsWebServer {
         }
 
         send(exchange, 200, "text/html", indexHtml());
+    }
+
+    private void handleFavicon(final HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            send(exchange, 405, "text/plain", "Method not allowed");
+            return;
+        }
+
+        try (InputStream stream = StatsWebServer.class.getResourceAsStream("/assets/stats4us/icon.png")) {
+            if (stream == null) {
+                send(exchange, 404, "text/plain", "Not found");
+                return;
+            }
+            send(exchange, 200, "image/png", stream.readAllBytes());
+        }
     }
 
     private void handleStats(final HttpExchange exchange) throws IOException {
@@ -197,9 +197,25 @@ public final class StatsWebServer {
     }
 
     private void send(final HttpExchange exchange, final int status, final String contentType, final String body) throws IOException {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", contentType + "; charset=utf-8");
+        send(exchange, status, contentType + "; charset=utf-8", body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void send(final HttpExchange exchange, final int status, final String contentType, byte[] bytes) throws IOException {
+        if (exchange.getRequestHeaders().getFirst("Accept-Encoding") != null
+            && exchange.getRequestHeaders().getFirst("Accept-Encoding").contains("gzip")) {
+            ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+            try (GZIPOutputStream gzip = new GZIPOutputStream(compressed)) {
+                gzip.write(bytes);
+            }
+            bytes = compressed.toByteArray();
+            exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+            exchange.getResponseHeaders().set("Vary", "Accept-Encoding");
+        }
+        exchange.getResponseHeaders().set("Content-Type", contentType);
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        exchange.getResponseHeaders().set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; img-src 'self' data:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'");
+        exchange.getResponseHeaders().set("Referrer-Policy", "no-referrer");
+        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream stream = exchange.getResponseBody()) {
             stream.write(bytes);
@@ -214,6 +230,7 @@ public final class StatsWebServer {
               <meta charset="utf-8">
               <meta name="viewport" content="width=device-width, initial-scale=1">
               <title>Stats4Us</title>
+              <link rel="icon" href="/favicon.png" type="image/png">
               <style>
                 :root {
                   --bg: #0d1117;
@@ -279,14 +296,19 @@ public final class StatsWebServer {
                   backdrop-filter: blur(14px);
                 }
                 .toolbar {
-                  display: grid;
-                  grid-template-columns: minmax(240px, 1fr) minmax(220px, 320px) auto;
-                  gap: 14px;
                   padding: 16px;
                   position: sticky;
                   top: 12px;
                   z-index: 5;
                 }
+                .toolbar-group {
+                  display: flex;
+                  justify-content: center;
+                  gap: 10px;
+                  margin: 0 auto;
+                  width: min(100%, 430px);
+                }
+                .toolbar-group select { flex: 1; min-width: 0; }
                 input, select, button {
                   color: var(--text);
                   background: #0b1320;
@@ -300,6 +322,11 @@ public final class StatsWebServer {
                   background: linear-gradient(180deg, #1f7a45, #155f35);
                   border-color: rgba(73, 209, 125, .45);
                   font-weight: 700;
+                }
+                button:disabled { cursor: wait; opacity: .65; }
+                input:focus-visible, select:focus-visible, button:focus-visible {
+                  outline: 3px solid rgba(73, 209, 125, .55);
+                  outline-offset: 2px;
                 }
                 .tabs {
                   display: flex;
@@ -354,10 +381,7 @@ public final class StatsWebServer {
                   gap: 18px;
                 }
                 .charts {
-                  display: grid;
-                  grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
-                  gap: 18px;
-                  align-items: start;
+                  display: block;
                 }
                 .leaderboard-tools {
                   display: flex;
@@ -372,6 +396,7 @@ public final class StatsWebServer {
                   border-radius: 18px;
                   box-shadow: var(--shadow);
                 }
+                .visibility-select { width: min(100%, 310px); }
                 .toggle {
                   background: rgba(255,255,255,.04);
                   border-color: var(--line);
@@ -437,73 +462,80 @@ public final class StatsWebServer {
                 .chart-panel.wide {
                   grid-column: 1 / -1;
                 }
-                .chart-panel.compact {
-                  min-height: 0;
-                }
-                .bar-row {
+                .column-chart {
                   display: grid;
-                  grid-template-columns: minmax(120px, 180px) minmax(90px, 1fr) minmax(72px, auto);
-                  align-items: center;
-                  gap: 12px;
-                  margin: 10px 0;
+                  grid-template-columns: max-content minmax(0, 1fr);
+                  gap: 10px;
+                  align-items: start;
                 }
-                .bar-label {
-                  overflow: hidden;
-                  text-overflow: ellipsis;
-                  white-space: nowrap;
-                  font-weight: 700;
-                }
-                .bar-track {
-                  height: 13px;
-                  overflow: hidden;
-                  border-radius: 999px;
-                  background: rgba(139,148,158,.18);
-                }
-                .bar-fill {
-                  height: 100%;
-                  min-width: 2px;
-                  border-radius: inherit;
-                  background: linear-gradient(90deg, var(--green), var(--gold));
-                }
-                .bar-value {
-                  color: var(--gold);
-                  font-weight: 800;
-                  text-align: right;
-                  white-space: nowrap;
-                  overflow-wrap: anywhere;
-                }
-                .chart-panel.compact .bar-label {
-                  white-space: normal;
-                }
-                .category-total-row {
-                  display: grid;
-                  gap: 7px;
-                  margin: 13px 0;
-                }
-                .category-total-head {
+                .column-y-axis {
                   display: flex;
+                  flex-direction: column;
                   justify-content: space-between;
-                  gap: 14px;
-                  align-items: baseline;
+                  height: 260px;
+                  padding-top: 24px;
+                  color: var(--muted);
+                  font-size: .72rem;
+                  text-align: right;
                 }
-                .category-total-label {
+                .column-scroll {
+                  overflow-x: auto;
+                  padding-bottom: 6px;
+                }
+                .column-plot {
+                  display: grid;
+                  gap: clamp(8px, 1.4vw, 18px);
+                  min-width: max(100%, 520px);
+                  height: 330px;
+                  padding: 0 10px 8px;
+                  border-bottom: 1px solid var(--line);
+                  background: repeating-linear-gradient(to top, rgba(139,148,158,.1) 0 1px, transparent 1px 25%);
+                }
+                .column-item {
+                  display: grid;
+                  grid-template-rows: 24px 236px 54px;
                   min-width: 0;
+                  text-align: center;
+                }
+                .column-value {
+                  color: var(--gold);
+                  font-size: .72rem;
+                  font-weight: 800;
                   overflow: hidden;
                   text-overflow: ellipsis;
                   white-space: nowrap;
-                  font-weight: 800;
                 }
-                .category-total-value {
-                  color: var(--gold);
-                  font-weight: 900;
-                  white-space: nowrap;
+                .column-bar-area {
+                  display: flex;
+                  align-items: end;
+                  justify-content: center;
+                }
+                .column-fill {
+                  width: min(52px, 78%);
+                  min-height: 2px;
+                  border-radius: 9px 9px 3px 3px;
+                  background: linear-gradient(180deg, var(--gold), var(--green));
+                  box-shadow: 0 8px 22px rgba(73,209,125,.16);
+                }
+                .column-label {
+                  padding-top: 9px;
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                  overflow-wrap: anywhere;
+                  font-weight: 700;
+                  font-size: .78rem;
+                  line-height: 1.2;
                 }
                 .donut-wrap {
                   display: grid;
-                  grid-template-columns: minmax(130px, 160px) minmax(0, 1fr);
-                  gap: 18px;
-                  align-items: center;
+                  grid-template-columns: minmax(220px, 320px);
+                  gap: 14px;
+                  justify-content: center;
+                  justify-items: center;
+                  width: min(100%, 560px);
+                  margin: 0 auto;
                 }
+                .donut-wrap > div:last-child { width: 100%; }
                 .donut {
                   width: 160px;
                   height: 160px;
@@ -575,6 +607,8 @@ public final class StatsWebServer {
                 .heatmap {
                   display: grid;
                   gap: 8px;
+                  overflow-x: auto;
+                  padding-bottom: 4px;
                 }
                 .heat-row {
                   display: grid;
@@ -680,6 +714,12 @@ public final class StatsWebServer {
                   box-shadow: var(--shadow);
                   overflow: hidden;
                 }
+                .player-list {
+                  position: sticky;
+                  top: 92px;
+                  max-height: calc(100vh - 112px);
+                  overflow-y: auto;
+                }
                 .player-list-head {
                   padding: 16px 18px;
                   border-bottom: 1px solid var(--line);
@@ -784,6 +824,21 @@ public final class StatsWebServer {
                   text-transform: uppercase;
                   background: rgba(0,0,0,.14);
                 }
+                th button {
+                  width: 100%;
+                  padding: 0;
+                  border: 0;
+                  border-radius: 0;
+                  background: transparent;
+                  color: inherit;
+                  text-align: left;
+                  font: inherit;
+                  letter-spacing: inherit;
+                  text-transform: inherit;
+                }
+                th button::after { content: ' ↕'; opacity: .45; }
+                th button[data-direction="asc"]::after { content: ' ↑'; opacity: 1; }
+                th button[data-direction="desc"]::after { content: ' ↓'; opacity: 1; }
                 td.value {
                   font-weight: 800;
                   color: var(--gold);
@@ -798,10 +853,18 @@ public final class StatsWebServer {
                   color: var(--red);
                 }
                 @media (max-width: 760px) {
-                  .toolbar, .summary, .player-browser, .charts { grid-template-columns: 1fr; }
+                  .player-browser, .charts { grid-template-columns: 1fr; }
+                  .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
                   .donut-wrap { grid-template-columns: 1fr; justify-items: center; }
                   .player-head { flex-direction: column; }
+                  .player-list { position: static; max-height: 45vh; }
                   th:nth-child(1), td:nth-child(1) { display: none; }
+                }
+                @media (max-width: 520px) {
+                  .toolbar-group { flex-direction: column; }
+                  .toolbar-group button, .visibility-select { width: 100%; }
+                  .column-chart { grid-template-columns: 1fr; }
+                  .column-y-axis { display: none; }
                 }
               </style>
             </head>
@@ -811,52 +874,71 @@ public final class StatsWebServer {
                   <div class="cube" aria-hidden="true"></div>
                   <div>
                     <h1>Stats4Us</h1>
-                    <p class="subtitle">Professional Minecraft server statistics dashboard</p>
+                    <p class="subtitle">Minecraft server statistics, in one place</p>
                   </div>
                 </div>
               </header>
               <main>
                 <section class="toolbar">
-                  <input id="search" placeholder="Search players, categories, or stats..." autocomplete="off">
-                  <select id="category"><option value="">All categories</option></select>
-                  <button id="refresh">Refresh</button>
+                  <div class="toolbar-group">
+                    <select id="category" aria-label="Filter by category"><option value="">All categories</option></select>
+                    <button id="refresh" type="button">Refresh</button>
+                  </div>
                 </section>
-                <nav class="tabs" aria-label="Dashboard sections">
-                  <button class="tab active" data-view="playersView">Players</button>
-                  <button class="tab" data-view="leaderboardsView">Leaderboards</button>
-                  <button class="tab" data-view="chartsView">Graphs & Charts</button>
-                  <button class="tab" data-view="allStatsView">All Stats</button>
+                <nav class="tabs" role="tablist" aria-label="Dashboard sections">
+                  <button class="tab active" role="tab" aria-selected="true" aria-controls="playersView" tabindex="0" data-route="players">Players</button>
+                  <button class="tab" role="tab" aria-selected="false" aria-controls="leaderboardsView" tabindex="-1" data-route="leaderboards">Leaderboards</button>
+                  <button class="tab" role="tab" aria-selected="false" aria-controls="chartsView" tabindex="-1" data-route="charts">Graphs & Charts</button>
+                  <button class="tab" role="tab" aria-selected="false" aria-controls="allStatsView" tabindex="-1" data-route="stats">All Stats</button>
                 </nav>
-                <section class="summary" id="summary"></section>
-                <section class="view active" id="playersView">
+                <section class="summary" id="summary" aria-live="polite"></section>
+                <section class="view active" id="playersView" role="tabpanel">
                   <section class="page-tools player-search-tools">
-                    <input id="playerSearch" placeholder="Search players..." autocomplete="off">
+                    <input id="playerSearch" aria-label="Search players" placeholder="Search players..." autocomplete="off">
                   </section>
                   <section class="player-browser">
                     <aside class="player-list" id="playerList"><div class="empty">Loading players...</div></aside>
                     <section class="player-detail" id="playerDetail"><div class="empty">Select a player to view their statistics.</div></section>
                   </section>
                 </section>
-                <section class="view" id="leaderboardsView">
+                <section class="view" id="leaderboardsView" role="tabpanel">
                   <section class="leaderboard-tools">
                     <div>
                       <strong>Leaderboard filters</strong>
-                      <div class="player-meta">Hide statistics where every player is currently at zero.</div>
+                      <div class="player-meta">Choose which statistics are available in each leaderboard.</div>
                     </div>
-                    <button class="toggle active" id="hideZeroLeaderboards">Hide zero-only stats</button>
+                    <select class="visibility-select" id="leaderboardVisibility" aria-label="Leaderboard statistic visibility">
+                      <option value="all">Show all stats</option>
+                      <option value="nonzero" selected>Hide zero-only stats</option>
+                      <option value="multi">Require 2+ players</option>
+                    </select>
                   </section>
                   <section class="leaderboards" id="leaderboards"></section>
                 </section>
-                <section class="view" id="chartsView">
+                <section class="view" id="chartsView" role="tabpanel">
+                  <section class="page-tools">
+                    <div>
+                      <strong>Chart filters</strong>
+                      <div class="player-meta">Choose which statistics are available to graph.</div>
+                    </div>
+                    <select class="visibility-select" id="chartVisibility" aria-label="Chart statistic visibility">
+                      <option value="all">Show all stats</option>
+                      <option value="nonzero" selected>Hide zero-only stats</option>
+                      <option value="multi">Require 2+ players</option>
+                    </select>
+                  </section>
                   <section class="charts" id="charts"></section>
                 </section>
-                <section class="view" id="allStatsView">
+                <section class="view" id="allStatsView" role="tabpanel">
                   <section class="page-tools">
                     <div>
                       <strong>All stats filters</strong>
                       <div class="player-meta">Hide statistics where every player is currently at zero.</div>
                     </div>
-                    <button class="toggle active" id="hideZeroStats">Hide zero stats</button>
+                    <button class="toggle active" id="hideZeroStats" type="button" aria-pressed="true">Show zero stats</button>
+                  </section>
+                  <section class="page-tools player-search-tools">
+                    <input id="allStatsSearch" aria-label="Search all statistics" placeholder="Search category, name, key, type, or value..." autocomplete="off">
                   </section>
                   <section class="stat-grid" id="allStats"></section>
                 </section>
@@ -864,15 +946,18 @@ public final class StatsWebServer {
               <script>
                 let snapshot = null;
                 let selectedPlayerId = null;
-                let hideZeroLeaderboards = true;
+                let leaderboardVisibility = 'nonzero';
+                let chartVisibility = 'nonzero';
                 let hideZeroStats = true;
+                let allStatsSearch = '';
                 let selectedTrendStatKey = null;
                 let comparisonStatSearch = '';
-                let comparisonMode = 'bar';
-                let selectedActivityDay = 'latest';
+                let comparisonMode = 'column';
+                let playerStatSearch = '';
+                let loading = false;
                 const selectedLeaderboardStats = {};
                 const leaderboardSearches = {};
-                const search = document.querySelector('#search');
+                const tableSorts = {};
                 const playerSearch = document.querySelector('#playerSearch');
                 const category = document.querySelector('#category');
                 const playerList = document.querySelector('#playerList');
@@ -881,30 +966,94 @@ public final class StatsWebServer {
                 const charts = document.querySelector('#charts');
                 const allStats = document.querySelector('#allStats');
                 const summary = document.querySelector('#summary');
-                const hideZeroLeaderboardsButton = document.querySelector('#hideZeroLeaderboards');
+                const leaderboardVisibilitySelect = document.querySelector('#leaderboardVisibility');
+                const chartVisibilitySelect = document.querySelector('#chartVisibility');
                 const hideZeroStatsButton = document.querySelector('#hideZeroStats');
-                document.querySelector('#refresh').addEventListener('click', load);
-                search.addEventListener('input', render);
+                const allStatsSearchInput = document.querySelector('#allStatsSearch');
+                const refreshButton = document.querySelector('#refresh');
+                const tabs = [...document.querySelectorAll('.tab')];
+                const routes = {
+                  players: { view: 'playersView', title: 'Players' },
+                  leaderboards: { view: 'leaderboardsView', title: 'Leaderboards' },
+                  charts: { view: 'chartsView', title: 'Graphs & Charts' },
+                  stats: { view: 'allStatsView', title: 'All Stats' }
+                };
+                refreshButton.addEventListener('click', load);
                 playerSearch.addEventListener('input', render);
                 category.addEventListener('change', render);
-                hideZeroLeaderboardsButton.addEventListener('click', () => {
-                  hideZeroLeaderboards = !hideZeroLeaderboards;
-                  hideZeroLeaderboardsButton.classList.toggle('active', hideZeroLeaderboards);
-                  hideZeroLeaderboardsButton.textContent = hideZeroLeaderboards ? 'Hide zero-only stats' : 'Show zero-only stats';
+                leaderboardVisibilitySelect.addEventListener('change', event => {
+                  leaderboardVisibility = event.target.value;
+                  render();
+                });
+                chartVisibilitySelect.addEventListener('change', event => {
+                  chartVisibility = event.target.value;
+                  render();
+                });
+                allStatsSearchInput.addEventListener('input', event => {
+                  allStatsSearch = event.target.value;
                   render();
                 });
                 hideZeroStatsButton.addEventListener('click', () => {
                   hideZeroStats = !hideZeroStats;
                   hideZeroStatsButton.classList.toggle('active', hideZeroStats);
-                  hideZeroStatsButton.textContent = hideZeroStats ? 'Hide zero stats' : 'Show zero stats';
+                  hideZeroStatsButton.setAttribute('aria-pressed', hideZeroStats);
+                  hideZeroStatsButton.textContent = hideZeroStats ? 'Show zero stats' : 'Hide zero stats';
                   render();
                 });
-                document.querySelectorAll('.tab').forEach(tab => {
-                  tab.addEventListener('click', () => {
-                    document.querySelectorAll('.tab').forEach(item => item.classList.toggle('active', item === tab));
-                    document.querySelectorAll('.view').forEach(view => view.classList.toggle('active', view.id === tab.dataset.view));
+                tabs.forEach((tab, index) => {
+                  tab.addEventListener('click', () => switchTab(tab.dataset.route, selectedPlayerId, true));
+                  tab.addEventListener('keydown', event => {
+                    let nextIndex = index;
+                    if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
+                    else if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+                    else if (event.key === 'Home') nextIndex = 0;
+                    else if (event.key === 'End') nextIndex = tabs.length - 1;
+                    else return;
+                    event.preventDefault();
+                    tabs[nextIndex].focus();
+                    switchTab(tabs[nextIndex].dataset.route, selectedPlayerId, true);
                   });
                 });
+                window.addEventListener('hashchange', routeFromHash);
+
+                function routeHash(route, playerId) {
+                  return `#${route}${route === 'players' && playerId ? `/${encodeURIComponent(playerId)}` : ''}`;
+                }
+
+                function routeFromHash() {
+                  const [route = 'players', encodedPlayerId] = location.hash.slice(1).split('/', 2);
+                  let playerId = null;
+                  try {
+                    playerId = encodedPlayerId ? decodeURIComponent(encodedPlayerId) : null;
+                  } catch {}
+                  switchTab(route || 'players', playerId);
+                }
+
+                function switchTab(route, playerId, navigate = false) {
+                  route = routes[route] ? route : 'players';
+                  if (route === 'players') {
+                    selectedPlayerId = snapshot
+                      ? snapshot.players.find(player => player.uuid === playerId)?.uuid ?? snapshot.players[0]?.uuid ?? null
+                      : playerId;
+                  }
+
+                  const hash = routeHash(route, selectedPlayerId);
+                  if (navigate && location.hash !== hash) {
+                    location.hash = hash;
+                    return;
+                  }
+
+                  tabs.forEach(tab => {
+                    const active = tab.dataset.route === route;
+                    tab.classList.toggle('active', active);
+                    tab.setAttribute('aria-selected', String(active));
+                    tab.tabIndex = active ? 0 : -1;
+                  });
+                  document.querySelectorAll('.view').forEach(view => view.classList.toggle('active', view.id === routes[route].view));
+                  document.title = `${routes[route].title} · Stats4Us`;
+                  if (location.hash !== hash) history.replaceState(null, '', hash);
+                  render();
+                }
 
                 function esc(value) {
                   return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -913,7 +1062,11 @@ public final class StatsWebServer {
                 }
 
                 async function load() {
-                  playerList.innerHTML = '<div class="empty">Loading players...</div>';
+                  if (loading) return;
+                  loading = true;
+                  refreshButton.disabled = true;
+                  refreshButton.textContent = 'Refreshing…';
+                  if (!snapshot) playerList.innerHTML = '<div class="empty">Loading players...</div>';
                   try {
                     const response = await fetch('/api/stats', { cache: 'no-store' });
                     if (!response.ok) throw new Error(await response.text());
@@ -921,14 +1074,15 @@ public final class StatsWebServer {
                     for (const player of snapshot.players) {
                       player.statRows = Object.fromEntries(player.stats.map(stat => [stat.key, stat]));
                     }
-                    if (!selectedPlayerId || !snapshot.players.some(player => player.uuid === selectedPlayerId)) {
-                      selectedPlayerId = snapshot.players[0]?.uuid ?? null;
-                    }
                     fillCategories();
-                    render();
+                    routeFromHash();
                   } catch (error) {
-                    playerList.innerHTML = '<div class="error">Unable to load statistics. Check the server log.</div>';
+                    if (!snapshot) playerList.innerHTML = '<div class="error">Unable to load statistics. Check the server log.</div>';
                     console.error(error);
+                  } finally {
+                    loading = false;
+                    refreshButton.disabled = false;
+                    refreshButton.textContent = 'Refresh';
                   }
                 }
 
@@ -941,7 +1095,7 @@ public final class StatsWebServer {
                   category.value = selected;
                 }
 
-                function renderSummary(filteredPlayers) {
+                function renderSummary() {
                   summary.innerHTML = [
                     ['Players', snapshot.totalPlayers],
                     ['Online', snapshot.onlinePlayers],
@@ -952,30 +1106,27 @@ public final class StatsWebServer {
 
                 function render() {
                   if (!snapshot) return;
-                  const query = search.value.trim().toLowerCase();
                   const selectedCategory = category.value;
-                  const catalog = filteredCatalog(query, selectedCategory);
+                  const catalog = filteredCatalog(selectedCategory);
                   const filtered = snapshot.players.map(player => {
-                    const stats = player.stats.filter(stat => {
-                      const matchesCategory = !selectedCategory || stat.category === selectedCategory;
-                      const haystack = `${player.name} ${player.uuid} ${stat.category} ${stat.name} ${stat.key}`.toLowerCase();
-                      return matchesCategory && (!query || haystack.includes(query));
-                    });
+                    const stats = player.stats.filter(stat => !selectedCategory || stat.category === selectedCategory);
                     return { ...player, stats };
-                  }).filter(player => player.stats.length || !query && !selectedCategory);
+                  }).filter(player => player.stats.length || !selectedCategory);
 
-                  renderSummary(filtered);
-                  renderPlayers(filtered);
-                  renderLeaderboards(catalog);
-                  renderCharts(catalog);
-                  renderAllStats(hideZeroStats ? catalog.filter(stat => maxForStat(stat.key) > 0) : catalog);
+                  renderSummary();
+                  const activeView = document.querySelector('.view.active')?.id;
+                  if (activeView === 'playersView') renderPlayers(filtered);
+                  if (activeView === 'leaderboardsView') renderLeaderboards(catalog);
+                  if (activeView === 'chartsView') renderCharts(catalog);
+                  if (activeView === 'allStatsView') {
+                    const visibleStats = hideZeroStats ? filterStatsByVisibility(catalog, 'nonzero') : catalog;
+                    renderAllStats(filterStatsByText(visibleStats, allStatsSearch));
+                  }
                 }
 
-                function filteredCatalog(query, selectedCategory) {
+                function filteredCatalog(selectedCategory) {
                   return snapshot.catalog.filter(stat => {
-                    const matchesCategory = !selectedCategory || stat.category === selectedCategory;
-                    const haystack = `${stat.category} ${stat.name} ${stat.key} ${stat.type} ${stat.value}`.toLowerCase();
-                    return matchesCategory && (!query || haystack.includes(query));
+                    return !selectedCategory || stat.category === selectedCategory;
                   });
                 }
  
@@ -983,6 +1134,12 @@ public final class StatsWebServer {
                   const trimmed = String(query ?? '').trim().toLowerCase();
                   if (!trimmed) return stats;
                   return stats.filter(stat => `${stat.category} ${stat.name} ${stat.key} ${stat.type} ${stat.value}`.toLowerCase().includes(trimmed));
+                }
+
+                function filterStatsByVisibility(stats, mode) {
+                  if (mode === 'all') return stats;
+                  const requiredPlayers = mode === 'multi' ? 2 : 1;
+                  return stats.filter(stat => playersAboveZero(stat.key) >= requiredPlayers);
                 }
 
                 function renderPlayers(filtered) {
@@ -999,6 +1156,7 @@ public final class StatsWebServer {
 
                   if (!visiblePlayers.some(player => player.uuid === selectedPlayerId)) {
                     selectedPlayerId = visiblePlayers[0].uuid;
+                    history.replaceState(null, '', routeHash('players', selectedPlayerId));
                   }
 
                   playerList.innerHTML = `
@@ -1007,7 +1165,7 @@ public final class StatsWebServer {
                       <button class="player-button ${player.uuid === selectedPlayerId ? 'active' : ''}" data-player="${esc(player.uuid)}" data-name="${esc(String(player.name ?? '').toLowerCase())}">
                         <span>
                           <span>${esc(player.name)}</span>
-                          <span class="player-meta">${esc(player.shownStats)} shown stats</span>
+                          <span class="player-meta">${esc(player.stats.length)} shown stats</span>
                         </span>
                         <span class="badge ${player.online ? '' : 'offline'}">${player.online ? 'Online' : 'Offline'}</span>
                       </button>
@@ -1015,13 +1173,16 @@ public final class StatsWebServer {
                   `;
 
                   document.querySelectorAll('.player-button').forEach(button => {
-                    button.addEventListener('click', () => {
-                      selectedPlayerId = button.dataset.player;
-                      render();
-                    });
+                    button.addEventListener('click', () => switchTab('players', button.dataset.player, true));
                   });
 
                   const player = visiblePlayers.find(item => item.uuid === selectedPlayerId) ?? visiblePlayers[0];
+                  const visibleStats = filterStatsByText(player.stats, playerStatSearch);
+                  const playerRows = sortedRows(visibleStats, 'player-detail', {
+                    category: stat => stat.category,
+                    statistic: stat => stat.name,
+                    value: stat => Number(stat.raw)
+                  });
                   playerDetail.innerHTML = `
                     <article class="player">
                       <div class="player-head">
@@ -1034,20 +1195,28 @@ public final class StatsWebServer {
                       <div class="featured">
                         ${player.featured.map(stat => `<div class="chip"><span>${esc(stat.name)}</span><strong>${esc(stat.formatted)}</strong></div>`).join('')}
                       </div>
-                      <table>
-                        <thead><tr><th>Category</th><th>Statistic</th><th>Value</th></tr></thead>
+                      <div class="page-tools"><input id="playerStatSearch" aria-label="Search statistic" placeholder="Search statistic..." value="${esc(playerStatSearch)}" autocomplete="off"></div>
+                      ${playerRows.length ? `<table>
+                        <thead><tr>${sortHeader('player-detail', 'category', 'Category')}${sortHeader('player-detail', 'statistic', 'Statistic')}${sortHeader('player-detail', 'value', 'Value')}</tr></thead>
                         <tbody>
-                          ${player.stats.map(stat => `<tr><td>${esc(stat.category)}</td><td>${esc(stat.name)}</td><td class="value">${esc(stat.formatted)}</td></tr>`).join('')}
+                          ${playerRows.map(stat => `<tr><td>${esc(stat.category)}</td><td>${esc(stat.name)}</td><td class="value">${esc(stat.formatted)}</td></tr>`).join('')}
                         </tbody>
-                      </table>
+                      </table>` : '<div class="empty">No statistics match the current filters.</div>'}
                     </article>
                   `;
+                  document.querySelector('#playerStatSearch').addEventListener('input', event => {
+                    const cursor = event.target.selectionStart;
+                    playerStatSearch = event.target.value;
+                    render();
+                    const nextSearch = document.querySelector('#playerStatSearch');
+                    nextSearch?.focus();
+                    nextSearch?.setSelectionRange(cursor, cursor);
+                  });
+                  bindTableSorts();
                 }
 
                 function renderLeaderboards(catalog) {
-                  if (hideZeroLeaderboards) {
-                    catalog = catalog.filter(stat => maxForStat(stat.key) > 0);
-                  }
+                  catalog = filterStatsByVisibility(catalog, leaderboardVisibility);
 
                   if (!catalog.length) {
                     leaderboards.innerHTML = '<div class="empty">No leaderboard sections match your filters.</div>';
@@ -1108,72 +1277,50 @@ public final class StatsWebServer {
                       }
                     });
                   });
+                  bindTableSorts();
                 }
 
                 function leaderboardTable(stat) {
-                  const rows = snapshot.players
+                  const defaultRows = snapshot.players
                     .map(player => ({
                       player,
                       raw: Number(player.values?.[stat.key] ?? 0),
                       formatted: player.statRows?.[stat.key]?.formatted
                     }))
                     .sort((a, b) => b.raw - a.raw || String(a.player.name).localeCompare(String(b.player.name)))
-                    .slice(0, 10);
+                    .slice(0, 10)
+                    .map((row, index) => ({ ...row, rank: index + 1 }));
+                  const tableId = `leaderboard:${stat.key}`;
+                  const rows = sortedRows(defaultRows, tableId, {
+                    rank: row => row.rank,
+                    player: row => row.player.name,
+                    value: row => row.raw
+                  });
 
                   return `
                     <table>
-                      <thead><tr><th>#</th><th>Player</th><th>Value</th></tr></thead>
+                      <thead><tr>${sortHeader(tableId, 'rank', '#')}${sortHeader(tableId, 'player', 'Player')}${sortHeader(tableId, 'value', 'Value')}</tr></thead>
                       <tbody>
-                        ${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${esc(row.player.name)}</td><td class="value">${esc(row.formatted ?? row.raw)}</td></tr>`).join('')}
+                        ${rows.map(row => `<tr><td>${row.rank}</td><td>${esc(row.player.name)}</td><td class="value">${esc(row.formatted ?? row.raw)}</td></tr>`).join('')}
                       </tbody>
                     </table>
                   `;
                 }
 
-                function maxForStat(statKey) {
-                  return Math.max(0, ...snapshot.players.map(player => Number(player.values?.[statKey] ?? 0)));
+                function playersAboveZero(statKey) {
+                  return snapshot.players.reduce((count, player) => count + (Number(player.values?.[statKey] ?? 0) > 0 ? 1 : 0), 0);
                 }
 
                 function renderCharts(catalog) {
-                  const nonZeroCatalog = catalog.filter(stat => maxForStat(stat.key) > 0);
-                  const chartCatalog = nonZeroCatalog.length ? nonZeroCatalog : catalog;
-                  if (!chartCatalog.length) {
-                    charts.innerHTML = '<div class="empty">No chart data matches your filters.</div>';
-                    return;
-                  }
-
+                  const chartCatalog = filterStatsByVisibility(catalog, chartVisibility);
                   const comparisonCatalog = filterStatsByText(chartCatalog, comparisonStatSearch);
                   if (!selectedTrendStatKey || !comparisonCatalog.some(stat => stat.key === selectedTrendStatKey)) {
                     selectedTrendStatKey = comparisonCatalog[0]?.key ?? null;
                   }
 
                   const selectedComparisonStat = comparisonCatalog.find(stat => stat.key === selectedTrendStatKey);
-                  const history = recentHistory();
-                  const activityDays = historyDays(history);
-                  if (selectedActivityDay !== 'latest' && !activityDays.some(day => day.key === selectedActivityDay)) {
-                    selectedActivityDay = 'latest';
-                  }
-                  const totals = categoryTotals(chartCatalog).filter(row => row.raw > 0);
                   charts.innerHTML = `
                     <article class="chart-panel wide">
-                      <h2>Professional server overview</h2>
-                      <p class="chart-note">Historical graphs are built from Stats4Us samples recorded while the mod is running. Existing world stat files provide current totals, but cannot reconstruct old timelines before tracking began.</p>
-                      <div class="insight-grid">
-                        ${insightCard('History samples', history.length)}
-                        ${insightCard('Peak online', Math.max(0, ...history.map(sample => sample.onlinePlayers)))}
-                        ${insightCard('Tracked players', snapshot.totalPlayers)}
-                        ${insightCard('Visible stats', snapshot.totalAvailableStats)}
-                      </div>
-                    </article>
-                    <article class="chart-panel">
-                      <h2>Player activity over time</h2>
-                      ${lineChart(history, sample => sample.onlinePlayers, value => value.toLocaleString(), 'Online players')}
-                    </article>
-                    <article class="chart-panel">
-                      <h2>Total playtime growth</h2>
-                      ${lineChart(history, sample => Number(sample.totals?.['minecraft:custom|minecraft:play_time'] ?? 0), formatMinecraftTime, 'Total playtime')}
-                    </article>
-                    <article class="chart-panel">
                       <h2>Player comparison</h2>
                       <div class="chart-subtitle">${selectedComparisonStat ? `${esc(selectedComparisonStat.category)} — ${esc(selectedComparisonStat.name)}` : 'Search for a statistic to compare players.'}</div>
                       <div class="chart-controls">
@@ -1182,28 +1329,12 @@ public final class StatsWebServer {
                           ${comparisonCatalog.map(stat => `<option value="${esc(stat.key)}" ${stat.key === selectedTrendStatKey ? 'selected' : ''}>${esc(stat.category)} — ${esc(stat.name)}</option>`).join('')}
                         </select>
                         <select id="comparisonMode">
-                          <option value="bar" ${comparisonMode === 'bar' ? 'selected' : ''}>Bar chart</option>
+                          <option value="column" ${comparisonMode === 'column' ? 'selected' : ''}>Column chart</option>
                           <option value="pie" ${comparisonMode === 'pie' ? 'selected' : ''}>Pie chart</option>
                           <option value="table" ${comparisonMode === 'table' ? 'selected' : ''}>Table</option>
                         </select>
                       </div>
                       ${selectedComparisonStat ? comparisonDisplay(playersForStat(selectedComparisonStat.key), comparisonMode) : '<div class="empty">No statistic matches this comparison search.</div>'}
-                    </article>
-                    <article class="chart-panel compact">
-                      <h2>Category totals</h2>
-                      <div class="chart-subtitle">Combined total values for every visible non-zero category.</div>
-                      ${categoryTotalsChart(totals)}
-                    </article>
-                    <article class="chart-panel wide">
-                      <h2>Player activity timeline</h2>
-                      <p class="chart-note">This shows playtime gained between history samples. Each cell is one sample interval for a player: grey means no added playtime, brighter green means more playtime was gained during that interval.</p>
-                      <div class="chart-controls">
-                        <select id="activityDay">
-                          <option value="latest" ${selectedActivityDay === 'latest' ? 'selected' : ''}>Latest 24 samples</option>
-                          ${activityDays.map(day => `<option value="${esc(day.key)}" ${day.key === selectedActivityDay ? 'selected' : ''}>${esc(day.label)}</option>`).join('')}
-                        </select>
-                      </div>
-                      ${activityTimeline(history, selectedActivityDay)}
                     </article>
                   `;
 
@@ -1234,198 +1365,7 @@ public final class StatsWebServer {
                       render();
                     });
                   }
-                  const activitySelect = document.querySelector('#activityDay');
-                  if (activitySelect) {
-                    activitySelect.addEventListener('change', event => {
-                      selectedActivityDay = event.target.value;
-                      render();
-                    });
-                  }
-                }
-
-                function insightCard(label, value) {
-                  return `<div class="insight-card"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
-                }
-
-                function recentHistory() {
-                  return (snapshot.history ?? []).slice(-96);
-                }
- 
-                function historyDays(history) {
-                  const days = new Map();
-                  for (const sample of history) {
-                    const key = localDateKey(sample.timestamp);
-                    if (key && !days.has(key)) {
-                      days.set(key, dayLabel(sample.timestamp));
-                    }
-                  }
-                  return [...days.entries()]
-                    .map(([key, label]) => ({ key, label }))
-                    .sort((a, b) => b.key.localeCompare(a.key));
-                }
- 
-                function localDateKey(timestamp) {
-                  if (!timestamp) return '';
-                  const date = new Date(timestamp);
-                  if (Number.isNaN(date.getTime())) return '';
-                  const year = date.getFullYear();
-                  const month = String(date.getMonth() + 1).padStart(2, '0');
-                  const day = String(date.getDate()).padStart(2, '0');
-                  return `${year}-${month}-${day}`;
-                }
- 
-                function dayLabel(timestamp) {
-                  if (!timestamp) return '';
-                  const date = new Date(timestamp);
-                  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-                }
-
-                function historyTrackedCatalog(catalog, history) {
-                  const trackedKeys = new Set();
-                  for (const sample of history) {
-                    for (const key of Object.keys(sample.totals ?? {})) {
-                      trackedKeys.add(key);
-                    }
-                  }
-                  return catalog.filter(stat => trackedKeys.has(stat.key));
-                }
-
-                function lineChart(rows, valueFn, displayFn, label) {
-                  if (!rows.length) {
-                    return '<div class="empty">No history recorded yet. Keep the server running and this graph will fill automatically.</div>';
-                  }
-
-                  const values = rows.map(row => Number(valueFn(row) ?? 0)).filter(value => Number.isFinite(value));
-                  if (!values.length) {
-                    return '<div class="empty">No valid values are available for this graph yet.</div>';
-                  }
-                  const min = Math.min(...values);
-                  const max = Math.max(...values);
-                  const range = Math.max(1, max - min);
-                  const gradientId = `lineGradient-${Math.random().toString(36).slice(2)}`;
-                  const points = values.map((value, index) => {
-                    const x = rows.length === 1 ? 50 : index / (rows.length - 1) * 1000;
-                    const y = 220 - ((value - min) / range * 180 + 20);
-                    return `${x},${y}`;
-                  }).join(' ');
-                  const last = values[values.length - 1] ?? 0;
-                  const first = values[0] ?? 0;
-                  const delta = last - first;
-
-                  return `
-                    <svg class="line-svg" viewBox="0 0 1000 260" role="img" aria-label="${esc(label)} line graph">
-                      <defs>
-                        <linearGradient id="${gradientId}" x1="0" x2="1">
-                          <stop offset="0%" stop-color="#49d17d"/>
-                          <stop offset="100%" stop-color="#f0b44c"/>
-                        </linearGradient>
-                      </defs>
-                      <polyline points="${points}" fill="none" stroke="url(#${gradientId})" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-                      <text x="20" y="32" fill="#8b949e" font-size="24">${esc(label)}</text>
-                      <text x="20" y="62" fill="#e6edf3" font-size="26" font-weight="800">${esc(displayFn(last))}</text>
-                      <text x="20" y="92" fill="${delta >= 0 ? '#49d17d' : '#ff6b6b'}" font-size="20">${delta >= 0 ? '+' : ''}${esc(displayFn(delta))} over range</text>
-                      <text x="20" y="244" fill="#8b949e" font-size="18">${esc(formatShortDate(rows[0]?.timestamp))}</text>
-                      <text x="840" y="244" fill="#8b949e" font-size="18">${esc(formatShortDate(rows[rows.length - 1]?.timestamp))}</text>
-                    </svg>
-                  `;
-                }
-
-                function formatShortDate(timestamp) {
-                  if (!timestamp) return '';
-                  const date = new Date(timestamp);
-                  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                }
-
-                function formatMinecraftTime(ticks) {
-                  const seconds = Math.max(0, Math.floor(Number(ticks) / 20));
-                  const hours = Math.floor(seconds / 3600);
-                  const minutes = Math.floor((seconds % 3600) / 60);
-                  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-                }
-
-                function activityTimeline(history, selectedDay) {
-                  if (history.length < 2) {
-                    return '<div class="empty">Need at least two history samples to calculate activity changes. Keep the server running and this will fill automatically.</div>';
-                  }
-
-                  const playKey = 'minecraft:custom|minecraft:play_time';
-                  const allPairs = [];
-                  for (let i = 1; i < history.length; i++) {
-                    const previous = history[i - 1];
-                    const current = history[i];
-                    if (selectedDay === 'latest' || localDateKey(current.timestamp) === selectedDay) {
-                      allPairs.push({ previous, current });
-                    }
-                  }
-                  const pairs = selectedDay === 'latest' ? allPairs.slice(-24) : allPairs;
-                  if (!pairs.length) {
-                    return '<div class="empty">No activity samples are available for the selected day yet.</div>';
-                  }
-
-                  const deltasByPlayer = snapshot.players.map(player => {
-                    const deltas = [];
-                    for (const pair of pairs) {
-                      const current = Number(pair.current.players?.[player.uuid]?.values?.[playKey] ?? 0);
-                      const previous = Number(pair.previous.players?.[player.uuid]?.values?.[playKey] ?? current);
-                      deltas.push(Math.max(0, current - previous));
-                    }
-                    const total = deltas.reduce((sum, delta) => sum + delta, 0);
-                    return { player, deltas, total };
-                  }).sort((a, b) => b.total - a.total || String(a.player.name).localeCompare(String(b.player.name))).slice(0, 12);
-                  const max = Math.max(1, ...deltasByPlayer.flatMap(row => row.deltas));
-                  const totalActivity = deltasByPlayer.reduce((sum, row) => sum + row.total, 0);
-                  const mostActive = deltasByPlayer.find(row => row.total > 0);
-                  const columns = Math.max(1, pairs.length);
-                  const firstTimestamp = pairs[0]?.previous?.timestamp;
-                  const lastTimestamp = pairs[pairs.length - 1]?.current?.timestamp;
-                  const windowLabel = selectedDay === 'latest' ? 'Latest samples' : dayLabel(lastTimestamp);
-
-                  return `
-                    <div class="activity-explainer">
-                      <div class="activity-pill"><span>Selected range</span><strong>${esc(windowLabel)}</strong></div>
-                      <div class="activity-pill"><span>Time window</span><strong>${esc(formatShortDate(firstTimestamp))} → ${esc(formatShortDate(lastTimestamp))}</strong></div>
-                      <div class="activity-pill"><span>Cell meaning</span><strong>Playtime gained between samples</strong></div>
-                      <div class="activity-pill"><span>Most active shown</span><strong>${esc(mostActive ? `${mostActive.player.name} · ${formatMinecraftTime(mostActive.total)}` : 'No activity yet')}</strong></div>
-                      <div class="activity-pill"><span>Total shown</span><strong>${esc(formatMinecraftTime(totalActivity))}</strong></div>
-                    </div>
-                    <div class="activity-scale">
-                      <span>No gain</span>
-                      <span class="scale-swatch" style="--alpha:.12"></span>
-                      <span class="scale-swatch" style="--alpha:.35"></span>
-                      <span class="scale-swatch" style="--alpha:.65"></span>
-                      <span class="scale-swatch" style="--alpha:1"></span>
-                      <span>More playtime gained</span>
-                    </div>
-                    <div class="heatmap">
-                      <div class="heat-row heat-header">
-                        <div>Player</div>
-                        <div class="heat-cells" style="grid-template-columns: repeat(${columns}, minmax(5px, 1fr));">
-                          ${pairs.map((pair, index) => {
-                            const showLabel = index === 0 || index === pairs.length - 1 || index % 6 === 0;
-                            return `<span title="${esc(formatShortDate(pair.current.timestamp))}">${showLabel ? esc(formatShortDate(pair.current.timestamp).split(',').pop()?.trim() ?? '') : ''}</span>`;
-                          }).join('')}
-                        </div>
-                        <div class="heat-total">Total</div>
-                      </div>
-                      ${deltasByPlayer.map(row => `
-                        <div class="heat-row">
-                          <div class="bar-label" title="${esc(row.player.name)}">${esc(row.player.name)}</div>
-                          <div class="heat-cells" style="grid-template-columns: repeat(${columns}, minmax(5px, 1fr));">
-                            ${row.deltas.map((delta, index) => {
-                              const alpha = delta <= 0 ? .08 : Math.max(.18, delta / max);
-                              const pair = pairs[index];
-                              return `<span class="heat-cell" title="${esc(row.player.name)} gained ${esc(formatMinecraftTime(delta))} from ${esc(formatShortDate(pair?.previous?.timestamp))} to ${esc(formatShortDate(pair?.current?.timestamp))}" style="background: rgba(73, 209, 125, ${alpha})"></span>`;
-                            }).join('')}
-                          </div>
-                          <div class="heat-total">${esc(formatMinecraftTime(row.total))}</div>
-                        </div>
-                      `).join('')}
-                    </div>
-                  `;
-                }
-
-                function topPlayersForStat(statKey) {
-                  return playersForStat(statKey).slice(0, 12);
+                  bindTableSorts();
                 }
 
                 function playersForStat(statKey) {
@@ -1438,77 +1378,106 @@ public final class StatsWebServer {
                     .sort((a, b) => b.raw - a.raw || String(a.player.name).localeCompare(String(b.player.name)));
                 }
 
-                function categoryTotals(catalog) {
-                  return Object.entries(groupBy(catalog, stat => stat.category))
-                    .map(([categoryName, stats]) => ({
-                      category: categoryName,
-                      raw: stats.reduce((sum, stat) => sum + snapshot.players.reduce((playerSum, player) => playerSum + Number(player.values?.[stat.key] ?? 0), 0), 0)
-                    }))
-                    .sort((a, b) => b.raw - a.raw || a.category.localeCompare(b.category));
-                }
-
-                function barChart(rows, labelFn, valueFn, displayFn) {
+                function columnChart(rows, labelFn, valueFn, displayFn) {
                   if (!rows.length) {
                     return '<div class="empty">No rows to display.</div>';
                   }
                   const max = Math.max(1, ...rows.map(valueFn));
-                  return rows.map(row => {
-                    const value = valueFn(row);
-                    const width = value <= 0 ? 0 : Math.max(2, value / max * 100);
-                    return `
-                      <div class="bar-row">
-                        <div class="bar-label" title="${esc(labelFn(row))}">${esc(labelFn(row))}</div>
-                        <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
-                        <div class="bar-value">${esc(displayFn(row))}</div>
-                      </div>
-                    `;
-                  }).join('');
-                }
- 
-                function categoryTotalsChart(rows) {
-                  if (!rows.length) {
-                    return '<div class="empty">No non-zero category totals to display.</div>';
-                  }
-                  const max = Math.max(1, ...rows.map(row => row.raw));
-                  return rows.map(row => {
-                    const width = row.raw <= 0 ? 0 : Math.max(2, row.raw / max * 100);
-                    return `
-                      <div class="category-total-row">
-                        <div class="category-total-head">
-                          <div class="category-total-label" title="${esc(row.category)}">${esc(row.category)}</div>
-                          <div class="category-total-value">${esc(row.raw.toLocaleString())}</div>
+                  const ticks = Array.from({ length: 5 }, (_, index) => max * (4 - index) / 4);
+                  return `
+                    <div class="column-chart">
+                      <div class="column-y-axis">${ticks.map(value => `<span>${esc(formatAxisValue(value))}</span>`).join('')}</div>
+                      <div class="column-scroll">
+                        <div class="column-plot" style="grid-template-columns:repeat(${rows.length},minmax(64px,1fr));">
+                          ${rows.map(row => {
+                            const value = valueFn(row);
+                            const height = value <= 0 ? 0 : Math.max(2, value / max * 100);
+                            return `
+                              <div class="column-item">
+                                <div class="column-value" title="${esc(displayFn(row))}">${esc(displayFn(row))}</div>
+                                <div class="column-bar-area"><div class="column-fill" style="height:${height}%"></div></div>
+                                <div class="column-label" title="${esc(labelFn(row))}">${esc(labelFn(row))}</div>
+                              </div>
+                            `;
+                          }).join('')}
                         </div>
-                        <div class="bar-track"><div class="bar-fill" style="width:${width}%"></div></div>
                       </div>
-                    `;
-                  }).join('');
+                    </div>
+                  `;
+                }
+
+                function formatAxisValue(value) {
+                  const absolute = Math.abs(value);
+                  if (absolute >= 1000000000) return `${(value / 1000000000).toFixed(1).replace('.0', '')}B`;
+                  if (absolute >= 1000000) return `${(value / 1000000).toFixed(1).replace('.0', '')}M`;
+                  if (absolute >= 1000) return `${(value / 1000).toFixed(1).replace('.0', '')}K`;
+                  return Math.round(value).toLocaleString();
                 }
 
                 function comparisonDisplay(rows, mode) {
                   const nonZeroRows = rows.filter(row => row.raw > 0);
-                  const displayRows = (nonZeroRows.length ? nonZeroRows : rows).slice(0, 12);
+                  const displayRows = (nonZeroRows.length ? nonZeroRows : rows).slice(0, 12)
+                    .map((row, index) => ({ ...row, rank: index + 1 }));
                   if (mode === 'pie') {
-                    return donutChartRows(displayRows, row => row.player.name, row => row.raw, row => row.formatted ?? row.raw);
+                    return donutChartRows(displayRows.slice(0, 9), row => row.player.name, row => row.raw, row => row.formatted ?? row.raw);
                   }
                   if (mode === 'table') {
                     return comparisonTable(displayRows);
                   }
-                  return barChart(displayRows, row => row.player.name, row => row.raw, row => row.formatted ?? row.raw);
+                  return columnChart(displayRows, row => row.player.name, row => row.raw, row => row.formatted ?? row.raw);
                 }
 
                 function comparisonTable(rows) {
                   if (!rows.length) {
                     return '<div class="empty">No players to display.</div>';
                   }
+                  const tableId = 'comparison';
+                  rows = sortedRows(rows, tableId, {
+                    rank: row => row.rank,
+                    player: row => row.player.name,
+                    value: row => row.raw
+                  });
 
                   return `
                     <table>
-                      <thead><tr><th>#</th><th>Player</th><th>Value</th></tr></thead>
+                      <thead><tr>${sortHeader(tableId, 'rank', '#')}${sortHeader(tableId, 'player', 'Player')}${sortHeader(tableId, 'value', 'Value')}</tr></thead>
                       <tbody>
-                        ${rows.map((row, index) => `<tr><td>${index + 1}</td><td>${esc(row.player.name)}</td><td class="value">${esc(row.formatted ?? row.raw)}</td></tr>`).join('')}
+                        ${rows.map(row => `<tr><td>${row.rank}</td><td>${esc(row.player.name)}</td><td class="value">${esc(row.formatted ?? row.raw)}</td></tr>`).join('')}
                       </tbody>
                     </table>
                   `;
+                }
+
+                function sortedRows(rows, tableId, accessors) {
+                  const sort = tableSorts[tableId];
+                  if (!sort) return rows;
+                  const accessor = accessors[sort.key];
+                  return [...rows].sort((left, right) => {
+                    const a = accessor(left);
+                    const b = accessor(right);
+                    const result = typeof a === 'number' && typeof b === 'number'
+                      ? a - b
+                      : String(a ?? '').localeCompare(String(b ?? ''), undefined, { sensitivity: 'base', numeric: true });
+                    return result * (sort.direction === 'asc' ? 1 : -1);
+                  });
+                }
+
+                function sortHeader(tableId, key, label) {
+                  const direction = tableSorts[tableId]?.key === key ? tableSorts[tableId].direction : '';
+                  return `<th><button type="button" class="sort-button" data-table="${esc(tableId)}" data-key="${esc(key)}" data-direction="${direction}" aria-label="Sort by ${esc(label)}">${esc(label)}</button></th>`;
+                }
+
+                function bindTableSorts() {
+                  document.querySelectorAll('.sort-button').forEach(button => {
+                    button.addEventListener('click', () => {
+                      const current = tableSorts[button.dataset.table];
+                      tableSorts[button.dataset.table] = {
+                        key: button.dataset.key,
+                        direction: current?.key === button.dataset.key && current.direction === 'asc' ? 'desc' : 'asc'
+                      };
+                      render();
+                    });
+                  });
                 }
 
                 function donutChartRows(rows, labelFn, valueFn, displayFn) {
@@ -1572,6 +1541,7 @@ public final class StatsWebServer {
                   }, {});
                 }
 
+                routeFromHash();
                 load();
                 setInterval(load, 30000);
               </script>

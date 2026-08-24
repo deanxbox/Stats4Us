@@ -2,6 +2,37 @@
 
 All notable changes to Stats4Us will be documented in this file.
 
+## [1.1.0] - 2026-07-14
+
+### Changed
+
+- Updated to Minecraft `26.2`, Fabric Loader `0.19.3`, Fabric API `0.154.2+26.2`, and Fabric Loom `1.17`.
+- Reduced dashboard work by rendering only the active tab.
+- Added bookmarkable hash routes, player deep links, browser history, and keyboard tab navigation to the dashboard.
+- Compressed dashboard responses when supported by the browser.
+- Simplified the dashboard layout, controls, focus states, and mobile activity timeline.
+- Dashboard addresses now use a reachable local address without blocking startup on external IP services.
+- Reduced Graphs & Charts to a full-width Player Comparison with horizontal bar, pie, and table modes.
+- Added sortable headers to player-detail, leaderboard, and comparison tables.
+- Added selected-player statistic search and removed the global dashboard search.
+- Continued collecting configured history while removing history graph UI.
+
+### Added
+
+- Added persistent operator commands to hide, unhide, and list dashboard-hidden players.
+- Added `display.hiddenPlayers` configuration containing player UUID/id strings.
+
+### Fixed
+
+- Corrected the zero-stat toggle labels and states.
+- Kept older history days available in the activity timeline while limiting line charts to recent samples.
+- Preserved negative playtime changes instead of displaying them as zero.
+- Prevented history totals from overflowing 32-bit integers.
+- Prevented overlapping refresh requests and refresh-time UI flicker.
+- Removed category totals that combined incompatible statistic units.
+- Excluded hidden players from dashboard players, totals, online counts, leaderboards, charts, and future history samples.
+- Improved wildcard-bind dashboard URLs by preferring site-local addresses, then usable non-loopback unicast addresses.
+
 ## [1.0.0] - 2026-05-25
 
 ### Added

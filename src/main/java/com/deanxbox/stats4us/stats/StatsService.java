@@ -29,9 +29,11 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 public final class StatsService {
     private static final Gson GSON = new GsonBuilder()
@@ -50,6 +52,7 @@ public final class StatsService {
     private Set<String> enabledStatTypes;
     private Set<String> enabledStats;
     private Set<String> hiddenStats;
+    private Set<String> hiddenPlayers;
     private long lastHistorySampleMillis;
 
     public StatsService(final MinecraftServer server, final ConfigManager configManager) {
@@ -67,6 +70,9 @@ public final class StatsService {
         this.enabledStatTypes = new HashSet<>(config.display.enabledStatTypes);
         this.enabledStats = new HashSet<>(config.display.enabledStats);
         this.hiddenStats = new HashSet<>(config.display.hiddenStats);
+        this.hiddenPlayers = config.display.hiddenPlayers.stream()
+            .map(value -> value.toLowerCase(Locale.ROOT))
+            .collect(Collectors.toSet());
         offlineStatsCache.clear();
     }
 
@@ -94,10 +100,10 @@ public final class StatsService {
         snapshot.statsPath = statsPath().toAbsolutePath().toString();
         snapshot.showZeroValues = config.display.showZeroValues;
         snapshot.enabledStatTypes = new ArrayList<>(config.display.enabledStatTypes);
-        snapshot.onlinePlayers = server.getPlayerCount();
+        snapshot.onlinePlayers = 0;
         snapshot.catalog = displayedCatalog();
         snapshot.totalAvailableStats = snapshot.catalog.size();
-        snapshot.history = new ArrayList<>(history);
+        snapshot.history = List.of();
 
         Map<String, String> knownNames = loadKnownNames();
         Map<UUID, PlayerStatsDto> players = new LinkedHashMap<>();
@@ -105,11 +111,18 @@ public final class StatsService {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             GameProfile profile = player.getGameProfile();
             knownNames.put(profile.id().toString(), profile.name());
+            if (isHiddenPlayer(profile.id().toString())) {
+                continue;
+            }
             players.put(profile.id(), fromOnlinePlayer(player));
+            snapshot.onlinePlayers++;
         }
 
         if (config.display.showOfflinePlayers) {
             for (Path file : statFiles()) {
+                if (isHiddenPlayer(idFromStatsFile(file))) {
+                    continue;
+                }
                 UUID uuid = uuidFromStatsFile(file);
                 if (uuid != null && players.containsKey(uuid)) {
                     continue;
@@ -163,7 +176,7 @@ public final class StatsService {
 
         HistorySampleDto sample = new HistorySampleDto();
         sample.timestamp = Instant.now().toString();
-        sample.onlinePlayers = server.getPlayerCount();
+        sample.onlinePlayers = 0;
 
         Map<String, String> knownNames = loadKnownNames();
         Map<String, HistoryPlayerSource> players = new LinkedHashMap<>();
@@ -171,13 +184,17 @@ public final class StatsService {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             GameProfile profile = player.getGameProfile();
             knownNames.put(profile.id().toString(), profile.name());
+            if (isHiddenPlayer(profile.id().toString())) {
+                continue;
+            }
             players.put(profile.id().toString(), new HistoryPlayerSource(profile.name(), true, valuesForOnlinePlayer(player)));
+            sample.onlinePlayers++;
         }
 
         if (config.display.showOfflinePlayers) {
             for (Path file : statFiles()) {
                 String id = idFromStatsFile(file);
-                if (id == null || players.containsKey(id)) {
+                if (id == null || isHiddenPlayer(id) || players.containsKey(id)) {
                     continue;
                 }
 
@@ -194,7 +211,7 @@ public final class StatsService {
             for (String trackedStat : config.history.trackedStats) {
                 int value = entry.getValue().values.getOrDefault(trackedStat, 0);
                 player.values.put(trackedStat, value);
-                sample.totals.merge(trackedStat, value, Integer::sum);
+                sample.totals.merge(trackedStat, (long) value, Long::sum);
             }
 
             sample.players.put(entry.getKey(), player);
@@ -309,6 +326,10 @@ public final class StatsService {
         }
 
         return enabledStatTypes.isEmpty() || enabledStatTypes.contains(descriptor.typeId);
+    }
+
+    private boolean isHiddenPlayer(final String id) {
+        return id != null && hiddenPlayers.contains(id.toLowerCase(Locale.ROOT));
     }
 
     private List<StatInfoDto> displayedCatalog() {

@@ -62,6 +62,13 @@ public final class Stats4UsMod implements ModInitializer {
         return statsService;
     }
 
+    public static void saveConfig() {
+        configManager.save();
+        if (statsService != null) {
+            statsService.refreshConfig();
+        }
+    }
+
     public static void reload(final MinecraftServer server) {
         configManager.load();
         if (statsService != null) {

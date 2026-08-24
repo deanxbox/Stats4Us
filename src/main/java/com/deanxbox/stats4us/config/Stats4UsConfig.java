@@ -32,6 +32,7 @@ public final class Stats4UsConfig {
         ));
         public List<String> enabledStats = new ArrayList<>();
         public List<String> hiddenStats = new ArrayList<>();
+        public List<String> hiddenPlayers = new ArrayList<>();
         public List<String> featuredStats = new ArrayList<>(List.of(
             "minecraft:custom|minecraft:play_time",
             "minecraft:custom|minecraft:deaths",

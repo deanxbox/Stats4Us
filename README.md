@@ -1,6 +1,6 @@
 # Stats4Us
 
-Stats4Us is a server-side Fabric mod for Minecraft `26.1.2` that exposes normal vanilla player statistics through a configurable web dashboard and operator-only commands.
+Stats4Us is a server-side Fabric mod for Minecraft `26.2` that exposes normal vanilla player statistics through a configurable web dashboard and operator-only commands.
 
 ## Features
 
@@ -16,8 +16,10 @@ Stats4Us is a server-side Fabric mod for Minecraft `26.1.2` that exposes normal 
 - Leaderboards can hide stats where every player has a zero value.
 - All Stats can also hide zero-only stats to keep the page readable.
 - Players tab uses a compact player list with click-to-view detail pages.
-- Graphs & Charts tab provides built-in bar charts and distribution graphs for top players and category totals.
-- Historical activity tracking records server/player samples over time for activity timelines and trend graphs.
+- Graphs & Charts provides a full-width player comparison with horizontal bar, pie, and sortable table modes.
+- Historical activity tracking continues recording server/player samples for retained history data.
+- Operators can persistently hide players from all dashboard totals, lists, tables, charts, and future history samples.
+- Dashboard tables have sortable columns, and selected-player statistics have their own search.
 - Operator-only `/stats4us` commands for viewing and editing player stats.
 
 ## Configuration
@@ -32,8 +34,9 @@ Important fields:
 - `display.enabledStatTypes`: stat categories to include.
 - `display.enabledStats`: if non-empty, only these exact `type|value` keys are shown.
 - `display.hiddenStats`: exact `type|value` keys to hide.
+- `display.hiddenPlayers`: player UUID/id strings excluded from dashboard data and future history samples.
 - `display.showZeroValues`: show stats with value `0`.
-- `history.enabled`: enable/disable historical samples for graphs.
+- `history.enabled`: enable/disable historical samples.
 - `history.sampleIntervalSeconds`: seconds between activity samples, default `300`.
 - `history.maxSamples`: maximum stored samples, default `2016`.
 - `history.trackedStats`: exact `type|value` stat keys recorded over time.
@@ -53,6 +56,9 @@ All commands require permission level `2`. Player arguments work for online play
 ```text
 /stats4us reload
 /stats4us web
+/stats4us hide <online/offline player or uuid>
+/stats4us unhide <online/offline player or uuid>
+/stats4us hidden
 /stats4us stats [search]
 /stats4us player <online/offline player or uuid> [search]
 /stats4us get <online/offline player or uuid> <stat name/key>
@@ -64,6 +70,9 @@ Examples:
 
 ```text
 /stats4us stats deaths
+/stats4us hide Steve
+/stats4us hidden
+/stats4us unhide Steve
 /stats4us player Steve deaths
 /stats4us get Steve deaths
 /stats4us set Steve 0 deaths

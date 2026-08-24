@@ -88,6 +88,9 @@ public final class ConfigManager {
         if (config.display.hiddenStats == null) {
             config.display.hiddenStats = new Stats4UsConfig.Display().hiddenStats;
         }
+        if (config.display.hiddenPlayers == null) {
+            config.display.hiddenPlayers = new Stats4UsConfig.Display().hiddenPlayers;
+        }
         if (config.display.featuredStats == null) {
             config.display.featuredStats = new Stats4UsConfig.Display().featuredStats;
         }

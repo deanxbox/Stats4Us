@@ -55,6 +55,16 @@ public final class Stats4UsCommands {
                     .executes(Stats4UsCommands::reload))
                 .then(literal("web")
                     .executes(Stats4UsCommands::web))
+                .then(literal("hide")
+                    .then(argument("player", StringArgumentType.word())
+                        .suggests(Stats4UsCommands::suggestPlayers)
+                        .executes(context -> setHidden(context, true))))
+                .then(literal("unhide")
+                    .then(argument("player", StringArgumentType.word())
+                        .suggests(Stats4UsCommands::suggestHiddenPlayers)
+                        .executes(context -> setHidden(context, false))))
+                .then(literal("hidden")
+                    .executes(Stats4UsCommands::listHidden))
                 .then(literal("stats")
                     .executes(context -> listStats(context, ""))
                     .then(argument("search", StringArgumentType.greedyString())
@@ -96,6 +106,9 @@ public final class Stats4UsCommands {
             Stats4Us commands:
             /stats4us web
             /stats4us reload
+            /stats4us hide <online/offline player or uuid>
+            /stats4us unhide <online/offline player or uuid>
+            /stats4us hidden
             /stats4us stats [search]
             /stats4us player <online/offline player or uuid> [search]
             /stats4us get <online/offline player or uuid> <stat name/key>
@@ -115,6 +128,62 @@ public final class Stats4UsCommands {
     private static int web(final CommandContext<CommandSourceStack> context) {
         context.getSource().sendSuccess(() -> Component.literal("Stats4Us web dashboard: " + Stats4UsMod.webAddress()), false);
         return 1;
+    }
+
+    private static int setHidden(final CommandContext<CommandSourceStack> context, final boolean hidden) {
+        try {
+            List<String> hiddenPlayers = Stats4UsMod.config().display.hiddenPlayers;
+            StatsTarget target = hidden ? resolveTarget(context) : resolveHiddenTarget(context, hiddenPlayers);
+            int existingIndex = indexOfIgnoreCase(hiddenPlayers, target.id);
+            if (hidden == (existingIndex >= 0)) {
+                context.getSource().sendSuccess(() -> Component.literal(target.displayName + " is already " + (hidden ? "hidden." : "visible.")), false);
+                return 0;
+            }
+
+            if (hidden) {
+                hiddenPlayers.add(target.id);
+            } else {
+                hiddenPlayers.remove(existingIndex);
+            }
+            Stats4UsMod.saveConfig();
+            context.getSource().sendSuccess(
+                () -> Component.literal(target.displayName + " is now " + (hidden ? "hidden from" : "visible on") + " the Stats4Us dashboard."),
+                true
+            );
+            return 1;
+        } catch (IllegalArgumentException exception) {
+            context.getSource().sendFailure(Component.literal(exception.getMessage()));
+            return 0;
+        }
+    }
+
+    private static int listHidden(final CommandContext<CommandSourceStack> context) {
+        List<String> hiddenPlayers = Stats4UsMod.config().display.hiddenPlayers;
+        if (hiddenPlayers.isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal("Stats4Us has no hidden players."), false);
+            return 0;
+        }
+
+        Map<String, String> names = loadKnownNames(context.getSource().getServer());
+        context.getSource().sendSuccess(() -> Component.literal("Hidden Stats4Us players (" + hiddenPlayers.size() + "):"), false);
+        for (String id : hiddenPlayers.stream().limit(MAX_CHAT_ROWS).toList()) {
+            context.getSource().sendSuccess(() -> Component.literal("- " + names.getOrDefault(id, id) + " [" + id + "]"), false);
+        }
+        if (hiddenPlayers.size() > MAX_CHAT_ROWS) {
+            context.getSource().sendSuccess(() -> Component.literal("Showing first " + MAX_CHAT_ROWS + "."), false);
+        }
+        return hiddenPlayers.size();
+    }
+
+    private static StatsTarget resolveHiddenTarget(final CommandContext<CommandSourceStack> context, final List<String> hiddenPlayers) {
+        String rawPlayer = StringArgumentType.getString(context, "player");
+        Map<String, String> names = loadKnownNames(context.getSource().getServer());
+        for (String id : hiddenPlayers) {
+            if (id.equalsIgnoreCase(rawPlayer) || names.getOrDefault(id, id).equalsIgnoreCase(rawPlayer)) {
+                return new StatsTarget(names.getOrDefault(id, id), id, null, null, false);
+            }
+        }
+        throw new IllegalArgumentException("Player '" + rawPlayer + "' is not hidden from Stats4Us.");
     }
 
     private static int listStats(final CommandContext<CommandSourceStack> context, final String search) {
@@ -350,6 +419,15 @@ public final class Stats4UsCommands {
         return builder.buildFuture();
     }
 
+    private static CompletableFuture<Suggestions> suggestHiddenPlayers(final CommandContext<CommandSourceStack> context, final SuggestionsBuilder builder) {
+        Map<String, String> names = loadKnownNames(context.getSource().getServer());
+        for (String id : Stats4UsMod.config().display.hiddenPlayers) {
+            suggestIfMatches(builder, names.getOrDefault(id, id));
+            suggestIfMatches(builder, id);
+        }
+        return builder.buildFuture();
+    }
+
     private static CompletableFuture<Suggestions> suggestMatching(final Iterable<String> values, final SuggestionsBuilder builder) {
         for (String value : values) {
             suggestIfMatches(builder, value);
@@ -371,6 +449,15 @@ public final class Stats4UsCommands {
         } catch (IllegalArgumentException ignored) {
             return null;
         }
+    }
+
+    private static int indexOfIgnoreCase(final List<String> values, final String value) {
+        for (int index = 0; index < values.size(); index++) {
+            if (values.get(index).equalsIgnoreCase(value)) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     private static String stripJson(final String fileName) {
