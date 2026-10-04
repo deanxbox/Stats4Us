@@ -1,0 +1,57 @@
+name: Publish to Modrinth
+
+# Fully automatic: every push to a version branch whose mod_version + Minecraft version
+# has not been tagged yet builds the jar, publishes it to Modrinth (with the matching
+# CHANGELOG.md section), then creates the git tag and GitHub release.
+on:
+  push:
+    branches:
+      - main
+      - '26.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Resolve release tag
+        id: meta
+        run: |
+          version=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '\r')
+          mc=$(grep '^minecraft_version=' gradle.properties | cut -d= -f2 | tr -d '\r')
+          tag="v${version}-mc${mc}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${tag} already exists; nothing to publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build and publish to Modrinth
+        if: steps.meta.outputs.exists == 'false'
+        run: chmod +x gradlew && ./gradlew build modrinth --no-daemon
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+      - name: Create tag and GitHub release
+        if: steps.meta.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release create "$TAG" build/libs/*[0-9].jar \
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file <(./gradlew -q printChangelog)

@@ -1,6 +1,6 @@
 # Stats4Us
 
-Stats4Us is a server-side Fabric mod for Minecraft `26.2` that exposes normal vanilla player statistics through a configurable web dashboard and operator-only commands.
+Stats4Us is a server-side Fabric mod for Minecraft `26.3` that exposes normal vanilla player statistics through a configurable web dashboard and operator-only commands.
 
 ## Features
 
@@ -12,7 +12,8 @@ Stats4Us is a server-side Fabric mod for Minecraft `26.2` that exposes normal va
   - Items crafted, used, broken, picked up, and dropped
   - Mobs killed and killed by
 - Web dashboard available on the server's normal IP/host plus the configured port.
-- Dashboard tabs for per-player stats, category leaderboards, and an all-stat catalog.
+- Dashboard tabs for per-player stats, a searchable one-at-a-time leaderboard (every player ranked, 10 per page), and an all-stat catalog.
+- Usernames are resolved for players who have not joined yet, via the user cache, whitelist/ops/ban lists and a background Mojang lookup.
 - Leaderboards can hide stats where every player has a zero value.
 - All Stats can also hide zero-only stats to keep the page readable.
 - Players tab uses a compact player list with click-to-view detail pages.

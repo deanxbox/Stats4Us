@@ -47,6 +47,7 @@ public final class StatsService {
     private final Path historyPath;
     private final List<HistorySampleDto> history = new ArrayList<>();
     private final Map<Path, CachedStats> offlineStatsCache = new HashMap<>();
+    private final PlayerNameResolver nameResolver;
 
     private Stats4UsConfig config;
     private Set<String> enabledStatTypes;
@@ -59,6 +60,7 @@ public final class StatsService {
         this.server = server;
         this.configManager = configManager;
         this.catalog = StatResolver.buildCatalog();
+        this.nameResolver = new PlayerNameResolver(server);
         this.historyPath = FabricLoader.getInstance().getConfigDir().resolve("stats4us-history.json");
         refreshConfig();
         loadHistory();
@@ -88,7 +90,12 @@ public final class StatsService {
         }
     }
 
+    public PlayerNameResolver names() {
+        return nameResolver;
+    }
+
     public void close() {
+        nameResolver.close();
         sampleHistory(true);
         saveHistory();
     }
@@ -144,6 +151,7 @@ public final class StatsService {
             .comparing((PlayerStatsDto player) -> !player.online)
             .thenComparing(player -> player.name == null ? player.uuid : player.name, String.CASE_INSENSITIVE_ORDER));
         snapshot.totalPlayers = snapshot.players.size();
+        nameResolver.requestMissing(snapshot.players.stream().filter(player -> player.uuid.equals(player.name)).map(player -> player.uuid).toList());
 
         return snapshot;
     }
@@ -444,35 +452,7 @@ public final class StatsService {
     }
 
     private Map<String, String> loadKnownNames() {
-        Map<String, String> names = new HashMap<>();
-        Path userCache = server.getFile("usercache.json");
-        if (!Files.isRegularFile(userCache)) {
-            return names;
-        }
-
-        try (Reader reader = Files.newBufferedReader(userCache, StandardCharsets.UTF_8)) {
-            JsonElement root = JsonParser.parseReader(reader);
-            if (!root.isJsonArray()) {
-                return names;
-            }
-
-            for (JsonElement element : root.getAsJsonArray()) {
-                if (!element.isJsonObject()) {
-                    continue;
-                }
-
-                JsonObject object = element.getAsJsonObject();
-                JsonElement uuid = object.get("uuid");
-                JsonElement name = object.get("name");
-                if (uuid != null && name != null) {
-                    names.put(uuid.getAsString(), name.getAsString());
-                }
-            }
-        } catch (Exception exception) {
-            Stats4UsMod.LOGGER.debug("Failed to read usercache.json for Stats4Us names.", exception);
-        }
-
-        return names;
+        return nameResolver.knownNames();
     }
 
     private UUID uuidFromStatsFile(final Path file) {

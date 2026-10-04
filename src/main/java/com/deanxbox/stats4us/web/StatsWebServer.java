@@ -380,6 +380,33 @@ public final class StatsWebServer {
                   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
                   gap: 18px;
                 }
+                .lb-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 14px 18px; border-bottom: 1px solid var(--line); background: linear-gradient(90deg, rgba(73,209,125,.07), rgba(240,180,76,.035)); }
+                .crumb { background: none; border: 0; padding: 4px 6px; color: var(--green); font-weight: 700; border-radius: 8px; }
+                .crumb.current { color: var(--text); font-weight: 800; }
+                .crumb-sep { color: var(--muted); }
+                .lb-body { padding: 18px; display: grid; gap: 14px; }
+                .lb-search-row { display: flex; gap: 10px; flex-wrap: wrap; }
+                .lb-search-row input { flex: 1 1 280px; min-width: 0; }
+                .lb-heading { margin: 4px 0 0; color: var(--muted); font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; }
+                .lb-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+                .lb-pick { display: grid; gap: 4px; text-align: left; font-weight: 500; background: rgba(255,255,255,.04); border-color: var(--line); }
+                .lb-pick:hover { border-color: rgba(73,209,125,.55); background: rgba(73,209,125,.08); }
+                .lb-pick strong { overflow-wrap: anywhere; }
+                .lb-pick span { color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+                .lb-title { display: flex; justify-content: space-between; align-items: end; gap: 14px; flex-wrap: wrap; }
+                .lb-title h2 { margin: 0; }
+                .lb-title input { width: min(100%, 260px); }
+                .lb-highlight td { background: rgba(240,180,76,.12); }
+                td.rank { width: 64px; font-weight: 800; color: var(--muted); }
+                td.rank-1 { color: #ffd166; } td.rank-2 { color: #cfd8dc; } td.rank-3 { color: #d08a52; }
+                .online-dot { display: inline-block; width: 8px; height: 8px; margin-left: 8px; border-radius: 50%; background: var(--green); }
+                .pager { display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap; }
+                .page-numbers { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+                .page-button { padding: 8px 12px; background: rgba(255,255,255,.04); border-color: var(--line); }
+                .page-button.active { background: linear-gradient(180deg, #215f3c, #143f2a); border-color: rgba(73,209,125,.55); }
+                .page-button:disabled { opacity: .4; cursor: default; }
+                .page-gap { color: var(--muted); padding: 8px 2px; }
+                .pager-meta { text-align: center; margin-top: -4px; }
                 .charts {
                   display: block;
                 }
@@ -902,17 +929,6 @@ public final class StatsWebServer {
                   </section>
                 </section>
                 <section class="view" id="leaderboardsView" role="tabpanel">
-                  <section class="leaderboard-tools">
-                    <div>
-                      <strong>Leaderboard filters</strong>
-                      <div class="player-meta">Choose which statistics are available in each leaderboard.</div>
-                    </div>
-                    <select class="visibility-select" id="leaderboardVisibility" aria-label="Leaderboard statistic visibility">
-                      <option value="all">Show all stats</option>
-                      <option value="nonzero" selected>Hide zero-only stats</option>
-                      <option value="multi">Require 2+ players</option>
-                    </select>
-                  </section>
                   <section class="leaderboards" id="leaderboards"></section>
                 </section>
                 <section class="view" id="chartsView" role="tabpanel">
@@ -955,8 +971,7 @@ public final class StatsWebServer {
                 let comparisonMode = 'column';
                 let playerStatSearch = '';
                 let loading = false;
-                const selectedLeaderboardStats = {};
-                const leaderboardSearches = {};
+                const lb = { category: null, categoryQuery: '', statKey: null, statQuery: '', page: 0, find: '', findJump: false };
                 const tableSorts = {};
                 const playerSearch = document.querySelector('#playerSearch');
                 const category = document.querySelector('#category');
@@ -966,7 +981,6 @@ public final class StatsWebServer {
                 const charts = document.querySelector('#charts');
                 const allStats = document.querySelector('#allStats');
                 const summary = document.querySelector('#summary');
-                const leaderboardVisibilitySelect = document.querySelector('#leaderboardVisibility');
                 const chartVisibilitySelect = document.querySelector('#chartVisibility');
                 const hideZeroStatsButton = document.querySelector('#hideZeroStats');
                 const allStatsSearchInput = document.querySelector('#allStatsSearch');
@@ -981,10 +995,6 @@ public final class StatsWebServer {
                 refreshButton.addEventListener('click', load);
                 playerSearch.addEventListener('input', render);
                 category.addEventListener('change', render);
-                leaderboardVisibilitySelect.addEventListener('change', event => {
-                  leaderboardVisibility = event.target.value;
-                  render();
-                });
                 chartVisibilitySelect.addEventListener('change', event => {
                   chartVisibility = event.target.value;
                   render();
@@ -1215,96 +1225,173 @@ public final class StatsWebServer {
                   bindTableSorts();
                 }
 
-                function renderLeaderboards(catalog) {
-                  catalog = filterStatsByVisibility(catalog, leaderboardVisibility);
-
-                  if (!catalog.length) {
-                    leaderboards.innerHTML = '<div class="empty">No leaderboard sections match your filters.</div>';
-                    return;
-                  }
-
-                  const byCategory = groupBy(catalog, stat => stat.category);
-                  leaderboards.innerHTML = Object.entries(byCategory).map(([categoryName, stats]) => {
-                    const categorySearch = leaderboardSearches[categoryName] ?? '';
-                    const visibleStats = filterStatsByText(stats, categorySearch);
-                    if (!visibleStats.length) {
-                      return `
-                        <article class="board">
-                          <div class="board-head">
-                            <h2>${esc(categoryName)}</h2>
-                            <input class="leaderboard-search" data-category="${esc(categoryName)}" placeholder="Search ${esc(categoryName)} stats..." value="${esc(categorySearch)}">
-                          </div>
-                          <div class="empty">No stats in this section match your search.</div>
-                        </article>
-                      `;
-                    }
-                    const selectedKey = visibleStats.some(stat => stat.key === selectedLeaderboardStats[categoryName])
-                      ? selectedLeaderboardStats[categoryName]
-                      : visibleStats[0].key;
-                    selectedLeaderboardStats[categoryName] = selectedKey;
-                    const selectedStat = visibleStats.find(stat => stat.key === selectedKey);
-                    return `
-                      <article class="board">
-                        <div class="board-head">
-                          <h2>${esc(categoryName)}</h2>
-                          <input class="leaderboard-search" data-category="${esc(categoryName)}" placeholder="Search ${esc(categoryName)} stats..." value="${esc(categorySearch)}">
-                          <select class="leaderboard-stat" data-category="${esc(categoryName)}">
-                            ${visibleStats.map(stat => `<option value="${esc(stat.key)}" ${stat.key === selectedKey ? 'selected' : ''}>${esc(stat.name)}</option>`).join('')}
-                          </select>
-                        </div>
-                        ${leaderboardTable(selectedStat)}
-                      </article>
-                    `;
-                  }).join('');
-
-                  document.querySelectorAll('.leaderboard-stat').forEach(select => {
-                    select.addEventListener('change', () => {
-                      selectedLeaderboardStats[select.dataset.category] = select.value;
-                      render();
-                    });
-                  });
-                  document.querySelectorAll('.leaderboard-search').forEach(input => {
-                    input.addEventListener('input', event => {
-                      const categoryName = input.dataset.category;
-                      const cursor = event.target.selectionStart;
-                      leaderboardSearches[input.dataset.category] = input.value;
-                      render();
-                      const nextInput = [...document.querySelectorAll('.leaderboard-search')]
-                        .find(item => item.dataset.category === categoryName);
-                      if (nextInput) {
-                        nextInput.focus();
-                        nextInput.setSelectionRange(cursor, cursor);
-                      }
-                    });
-                  });
-                  bindTableSorts();
+                function lbReset(level) {
+                  if (level <= 0) { lb.category = null; lb.categoryQuery = ''; }
+                  if (level <= 1) { lb.statKey = null; lb.statQuery = ''; }
+                  lb.page = 0;
+                  lb.find = '';
+                  render();
                 }
 
-                function leaderboardTable(stat) {
-                  const defaultRows = snapshot.players
+                function lbRank(stat) {
+                  const rows = snapshot.players
                     .map(player => ({
                       player,
                       raw: Number(player.values?.[stat.key] ?? 0),
                       formatted: player.statRows?.[stat.key]?.formatted
                     }))
-                    .sort((a, b) => b.raw - a.raw || String(a.player.name).localeCompare(String(b.player.name)))
-                    .slice(0, 10)
-                    .map((row, index) => ({ ...row, rank: index + 1 }));
-                  const tableId = `leaderboard:${stat.key}`;
-                  const rows = sortedRows(defaultRows, tableId, {
-                    rank: row => row.rank,
-                    player: row => row.player.name,
-                    value: row => row.raw
+                    .sort((a, b) => b.raw - a.raw || String(a.player.name).localeCompare(String(b.player.name), undefined, { sensitivity: 'base' }));
+                  let previous = null;
+                  let rank = 0;
+                  rows.forEach((row, index) => {
+                    if (row.raw !== previous) { rank = index + 1; previous = row.raw; }
+                    row.rank = rank;
                   });
+                  return rows;
+                }
 
+                function renderLeaderboards(catalog) {
+                  const usable = filterStatsByVisibility(catalog, leaderboardVisibility);
+                  const byCategory = groupBy(usable, stat => stat.category);
+                  const stat = lb.statKey ? snapshot.catalog.find(item => item.key === lb.statKey) : null;
+                  if (lb.statKey && !stat) { lb.statKey = null; }
+                  const crumbs = ['<button type="button" class="crumb" data-lb-reset="0">Leaderboards</button>'];
+                  if (lb.category) crumbs.push(`<button type="button" class="crumb" data-lb-reset="1">${esc(lb.category)}</button>`);
+                  if (stat) crumbs.push(`<span class="crumb current">${esc(stat.name)}</span>`);
+                  const header = `<nav class="lb-crumbs" aria-label="Leaderboard path">${crumbs.join('<span class="crumb-sep">›</span>')}</nav>`;
+                  const zeroToggle = `<label class="lb-option"><select class="visibility-select" id="lbVisibility" aria-label="Statistic visibility">
+                      <option value="all" ${leaderboardVisibility === 'all' ? 'selected' : ''}>Show all stats</option>
+                      <option value="nonzero" ${leaderboardVisibility === 'nonzero' ? 'selected' : ''}>Hide zero-only stats</option>
+                      <option value="multi" ${leaderboardVisibility === 'multi' ? 'selected' : ''}>Require 2+ players</option>
+                    </select></label>`;
+                  let body;
+
+                  if (stat) {
+                    body = lbBoard(stat);
+                  } else if (lb.category) {
+                    const stats = filterStatsByText(byCategory[lb.category] ?? [], lb.statQuery);
+                    body = `
+                      <div class="lb-search-row">
+                        <input id="lbStatSearch" placeholder="Search ${esc(lb.category)}, e.g. diamond, stone, zombie" value="${esc(lb.statQuery)}" autocomplete="off">
+                        ${zeroToggle}
+                      </div>
+                      <div class="lb-results">${stats.length ? stats.slice(0, 60).map(item => lbStatButton(item, false)).join('') : '<div class="empty">No stats match your search.</div>'}</div>
+                      ${stats.length > 60 ? '<div class="player-meta lb-more">Showing the first 60 matches. Keep typing to narrow it down.</div>' : ''}`;
+                  } else {
+                    const query = lb.categoryQuery.trim().toLowerCase();
+                    const categories = Object.entries(byCategory)
+                      .filter(([name]) => !query || name.toLowerCase().includes(query))
+                      .sort((a, b) => a[0].localeCompare(b[0]));
+                    const directStats = query
+                      ? usable.filter(item => `${item.category} ${item.name} ${item.key}`.toLowerCase().includes(query)).slice(0, 40)
+                      : [];
+                    body = `
+                      <div class="lb-search-row">
+                        <input id="lbCategorySearch" placeholder="Search for a statistic, e.g. blocks mined, deaths, play time" value="${esc(lb.categoryQuery)}" autocomplete="off">
+                        ${zeroToggle}
+                      </div>
+                      ${categories.length ? `<h3 class="lb-heading">Categories</h3><div class="lb-results">${categories.map(([name, stats]) => `
+                        <button type="button" class="lb-pick" data-lb-category="${esc(name)}"><strong>${esc(name)}</strong><span>${stats.length} stats</span></button>`).join('')}</div>` : ''}
+                      ${directStats.length ? `<h3 class="lb-heading">Matching statistics</h3><div class="lb-results">${directStats.map(item => lbStatButton(item, true)).join('')}</div>` : ''}
+                      ${!categories.length && !directStats.length ? '<div class="empty">No statistics match your search.</div>' : ''}`;
+                  }
+
+                  leaderboards.innerHTML = `<article class="board">${header}<div class="lb-body">${body}</div></article>`;
+
+                  leaderboards.querySelectorAll('[data-lb-reset]').forEach(button => {
+                    button.addEventListener('click', () => lbReset(Number(button.dataset.lbReset)));
+                  });
+                  leaderboards.querySelectorAll('[data-lb-category]').forEach(button => {
+                    button.addEventListener('click', () => {
+                      lb.category = button.dataset.lbCategory;
+                      lb.statQuery = '';
+                      render();
+                    });
+                  });
+                  leaderboards.querySelectorAll('[data-lb-stat]').forEach(button => {
+                    button.addEventListener('click', () => {
+                      const picked = snapshot.catalog.find(item => item.key === button.dataset.lbStat);
+                      lb.category = picked?.category ?? lb.category;
+                      lb.statKey = button.dataset.lbStat;
+                      lb.page = 0;
+                      lb.find = '';
+                      render();
+                    });
+                  });
+                  const visibility = leaderboards.querySelector('#lbVisibility');
+                  if (visibility) visibility.addEventListener('change', () => { leaderboardVisibility = visibility.value; render(); });
+
+                  const bindInput = (id, apply) => {
+                    const input = leaderboards.querySelector('#' + id);
+                    if (!input) return;
+                    input.addEventListener('input', event => {
+                      const cursor = event.target.selectionStart;
+                      apply(input.value);
+                      render();
+                      const next = leaderboards.querySelector('#' + id);
+                      if (next) { next.focus(); next.setSelectionRange(cursor, cursor); }
+                    });
+                  };
+                  bindInput('lbCategorySearch', value => { lb.categoryQuery = value; });
+                  bindInput('lbStatSearch', value => { lb.statQuery = value; });
+                  bindInput('lbFind', value => { lb.find = value; lb.findJump = true; });
+                  leaderboards.querySelectorAll('[data-lb-page]').forEach(button => {
+                    button.addEventListener('click', () => {
+                      lb.page = Number(button.dataset.lbPage);
+                      render();
+                    });
+                  });
+                }
+
+                function lbStatButton(stat, showCategory) {
+                  return `<button type="button" class="lb-pick" data-lb-stat="${esc(stat.key)}"><strong>${esc(stat.name)}</strong><span>${showCategory ? esc(stat.category) : esc(stat.value ?? '')}</span></button>`;
+                }
+
+                function lbBoard(stat) {
+                  const ranked = lbRank(stat);
+                  const pageSize = 10;
+                  const pages = Math.max(1, Math.ceil(ranked.length / pageSize));
+                  const query = lb.find.trim().toLowerCase();
+                  let highlightId = null;
+                  if (query) {
+                    const index = ranked.findIndex(row => String(row.player.name).toLowerCase().includes(query));
+                    if (index >= 0) {
+                      highlightId = ranked[index].player.uuid;
+                      if (lb.findJump) lb.page = Math.floor(index / pageSize);
+                    }
+                  }
+                  lb.findJump = false;
+                  lb.page = Math.min(Math.max(0, lb.page), pages - 1);
+                  const start = lb.page * pageSize;
+                  const rows = ranked.slice(start, start + pageSize);
+                  const pageButtons = [];
+                  for (let i = 0; i < pages; i++) {
+                    if (pages > 9 && i !== 0 && i !== pages - 1 && Math.abs(i - lb.page) > 2) {
+                      if (pageButtons[pageButtons.length - 1] !== '<span class="page-gap">…</span>') pageButtons.push('<span class="page-gap">…</span>');
+                      continue;
+                    }
+                    pageButtons.push(`<button type="button" class="page-button ${i === lb.page ? 'active' : ''}" data-lb-page="${i}" aria-label="Page ${i + 1}" ${i === lb.page ? 'aria-current="page"' : ''}>${i + 1}</button>`);
+                  }
                   return `
+                    <div class="lb-title">
+                      <div>
+                        <h2>${esc(stat.name)}</h2>
+                        <div class="player-meta">${esc(stat.category)} · ${ranked.length} players ranked</div>
+                      </div>
+                      <input id="lbFind" placeholder="Find a player..." value="${esc(lb.find)}" autocomplete="off" aria-label="Find a player in this leaderboard">
+                    </div>
                     <table>
-                      <thead><tr>${sortHeader(tableId, 'rank', '#')}${sortHeader(tableId, 'player', 'Player')}${sortHeader(tableId, 'value', 'Value')}</tr></thead>
+                      <thead><tr><th>#</th><th>Player</th><th>Value</th></tr></thead>
                       <tbody>
-                        ${rows.map(row => `<tr><td>${row.rank}</td><td>${esc(row.player.name)}</td><td class="value">${esc(row.formatted ?? row.raw)}</td></tr>`).join('')}
+                        ${rows.map(row => `<tr class="${row.player.uuid === highlightId ? 'lb-highlight' : ''}"><td class="rank rank-${row.rank <= 3 ? row.rank : 'n'}">${row.rank}</td><td>${esc(row.player.name)}${row.player.online ? '<span class="online-dot" title="Online"></span>' : ''}</td><td class="value">${esc(row.formatted ?? row.raw)}</td></tr>`).join('')}
                       </tbody>
                     </table>
-                  `;
+                    <div class="pager">
+                      <button type="button" class="page-button" data-lb-page="${lb.page - 1}" ${lb.page === 0 ? 'disabled' : ''}>Previous</button>
+                      <div class="page-numbers">${pageButtons.join('')}</div>
+                      <button type="button" class="page-button" data-lb-page="${lb.page + 1}" ${lb.page >= pages - 1 ? 'disabled' : ''}>Next</button>
+                    </div>
+                    <div class="player-meta pager-meta">Showing ${ranked.length ? start + 1 : 0}–${Math.min(start + pageSize, ranked.length)} of ${ranked.length}</div>`;
                 }
 
                 function playersAboveZero(statKey) {

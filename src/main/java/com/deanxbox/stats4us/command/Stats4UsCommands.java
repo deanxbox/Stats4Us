@@ -3,6 +3,7 @@ package com.deanxbox.stats4us.command;
 import com.deanxbox.stats4us.Stats4UsMod;
 import com.deanxbox.stats4us.stats.StatDescriptor;
 import com.deanxbox.stats4us.stats.StatResolver;
+import com.deanxbox.stats4us.stats.StatsService;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -360,35 +361,8 @@ public final class Stats4UsCommands {
     }
 
     private static Map<String, String> loadKnownNames(final MinecraftServer server) {
-        Map<String, String> names = new LinkedHashMap<>();
-        Path userCache = server.getFile("usercache.json");
-        if (!Files.isRegularFile(userCache)) {
-            return names;
-        }
-
-        try (Reader reader = Files.newBufferedReader(userCache, StandardCharsets.UTF_8)) {
-            JsonElement root = JsonParser.parseReader(reader);
-            if (!root.isJsonArray()) {
-                return names;
-            }
-
-            for (JsonElement element : root.getAsJsonArray()) {
-                if (!element.isJsonObject()) {
-                    continue;
-                }
-
-                JsonObject object = element.getAsJsonObject();
-                JsonElement uuid = object.get("uuid");
-                JsonElement name = object.get("name");
-                if (uuid != null && name != null) {
-                    names.put(uuid.getAsString(), name.getAsString());
-                }
-            }
-        } catch (Exception exception) {
-            Stats4UsMod.LOGGER.debug("Failed to read usercache.json for Stats4Us command suggestions.", exception);
-        }
-
-        return names;
+        StatsService service = Stats4UsMod.statsService();
+        return service == null ? new LinkedHashMap<>() : new LinkedHashMap<>(service.names().knownNames());
     }
 
     private static CompletableFuture<Suggestions> suggestStats(final CommandContext<CommandSourceStack> context, final SuggestionsBuilder builder) {
