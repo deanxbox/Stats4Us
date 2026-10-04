@@ -13,7 +13,7 @@ All notable changes to Stats4Us will be documented in this file.
 - Rebuilt the Leaderboards tab: it now shows one leaderboard at a time. Search for a statistic or category (for example "blocks mined"), pick the specific entry (for example a block), then see every player ranked.
 - Leaderboards list all players, 10 per page, with Previous/Next and page numbers. Players with equal values share a rank, and a player search jumps to and highlights that player.
 - Added a breadcrumb trail to move back through category and statistic choices.
-- Compatible with Minecraft 26.3.
+- Compatible with Minecraft 26.2.
 - Releases are now published to Modrinth automatically with the changelog for each version.
 
 ## [1.1.0] - 2026-07-14

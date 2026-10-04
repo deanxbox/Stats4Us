@@ -1,6 +1,6 @@
 # Stats4Us
 
-Stats4Us is a server-side Fabric mod for Minecraft `26.3` that exposes normal vanilla player statistics through a configurable web dashboard and operator-only commands.
+Stats4Us is a server-side Fabric mod for Minecraft `26.2` that exposes normal vanilla player statistics through a configurable web dashboard and operator-only commands.
 
 ## Features
 
